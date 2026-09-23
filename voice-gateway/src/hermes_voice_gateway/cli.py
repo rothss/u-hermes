@@ -27,7 +27,7 @@ async def _check(settings: Settings) -> int:
         print("health:", await hermes.health())
         caps = await hermes.capabilities()
         features = caps.get("features", {})
-        required = ["run_submission", "run_status", "run_stop", "run_steer"]
+        required = ["run_submission", "run_status", "run_stop", "run_steer", "run_approval_response"]
         print("required features:")
         ok = True
         for name in required:
