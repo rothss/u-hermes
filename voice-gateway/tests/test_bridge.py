@@ -17,7 +17,7 @@ class FakeHermes:
         self.steered: list[tuple[str, str]] = []
         self.stopped: list[str] = []
 
-    async def start_run(self, text: str) -> HermesRun:
+    async def start_run(self, text: str, idempotency_key: str | None = None) -> HermesRun:
         self.started.append(text)
         return HermesRun(run_id=self.final.run_id, status="started")
 
@@ -42,7 +42,7 @@ class FakeHermes:
 async def test_inline_completed_run():
     fake = FakeHermes(HermesRun("run-1", "completed", output="42"))
     bridge = HermesBridge(fake, inline_wait_seconds=0.1)
-    result = json.loads(await bridge.start("question"))
+    result = json.loads(await bridge.start("question", request_id="call-1"))
     assert result["status"] == "completed"
     assert result["result"] == "42"
     assert bridge.active_run_id is None
