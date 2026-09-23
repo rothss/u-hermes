@@ -21,7 +21,8 @@ def build_parser() -> argparse.ArgumentParser:
 async def _check(settings: Settings) -> int:
     hermes = HermesClient(settings.hermes_base_url, settings.hermes_api_key,
                           settings.hermes_session_id, settings.hermes_session_key,
-                          settings.hermes_request_timeout_seconds, settings.hermes_poll_interval_seconds)
+                          settings.hermes_request_timeout_seconds, settings.hermes_poll_interval_seconds,
+                          settings.hermes_session_rollover_runs)
     try:
         print("health:", await hermes.health())
         caps = await hermes.capabilities()
@@ -41,7 +42,8 @@ async def _check(settings: Settings) -> int:
 async def _run(settings: Settings) -> None:
     hermes = HermesClient(settings.hermes_base_url, settings.hermes_api_key,
                           settings.hermes_session_id, settings.hermes_session_key,
-                          settings.hermes_request_timeout_seconds, settings.hermes_poll_interval_seconds)
+                          settings.hermes_request_timeout_seconds, settings.hermes_poll_interval_seconds,
+                          settings.hermes_session_rollover_runs)
     await hermes.health()
     bridge = HermesBridge(hermes, settings.hermes_inline_wait_seconds)
     player = PCMPlayer(settings.audio_output_device)

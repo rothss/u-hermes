@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -67,6 +68,7 @@ class HermesBridge:
     async def start(self, request: str) -> str:
         if not request:
             return json.dumps({"status": "error", "error": "empty request"}, ensure_ascii=False)
+        started = time.perf_counter()
         run = await self.hermes.start_run(request)
         async with self._lock:
             self._runs[run.run_id] = run
@@ -76,12 +78,16 @@ class HermesBridge:
         except TimeoutError:
             task = asyncio.create_task(self._monitor(run.run_id), name=f"hermes-monitor-{run.run_id}")
             self._monitor_tasks[run.run_id] = task
+            log.info("HERMES run running run_id=%s elapsed_ms=%.1f", run.run_id,
+                     (time.perf_counter() - started) * 1000)
             return json.dumps({
                 "status": "running",
                 "run_id": run.run_id,
                 "instruction": "Acknowledge briefly that Hermes is working. Do not invent or summarize a result yet. The completed result will be delivered automatically."
             }, ensure_ascii=False)
         await self._record_terminal(terminal)
+        log.info("HERMES run terminal run_id=%s status=%s elapsed_ms=%.1f",
+                 run.run_id, terminal.status, (time.perf_counter() - started) * 1000)
         return self._terminal_tool_output(terminal)
 
     async def steer(self, instruction: str) -> str:
@@ -105,9 +111,12 @@ class HermesBridge:
         return json.dumps({"status": "stopping", "run_id": run_id, "hermes": result}, ensure_ascii=False)
 
     async def _monitor(self, run_id: str) -> None:
+        started = time.perf_counter()
         try:
             terminal = await self.hermes.wait_for_terminal(run_id)
             await self._record_terminal(terminal)
+            log.info("HERMES background completed run_id=%s status=%s elapsed_ms=%.1f",
+                     run_id, terminal.status, (time.perf_counter() - started) * 1000)
             if self._announce:
                 await self._announce(self._announcement_text(terminal))
         except asyncio.CancelledError:

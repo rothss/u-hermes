@@ -4,6 +4,9 @@ import asyncio
 import base64
 import json
 import logging
+import time
+import uuid
+from contextlib import suppress
 from typing import Any
 
 import websockets
@@ -48,16 +51,29 @@ class QwenRealtimeClient:
         self.audio_mode = audio_mode
         self.ws: Any = None
         self._send_lock = asyncio.Lock()
+        self._announcement_lock = asyncio.Lock()
+        self._session_ready = False
         self._response_active = False
         self._user_speaking = False
         self._closed = asyncio.Event()
+        self._connection_lost = asyncio.Event()
         self._pending_announcements: asyncio.Queue[str] = asyncio.Queue()
+        self._response_started_at: float | None = None
+        self._first_audio_logged = False
+        self._connected_at: float | None = None
         self.bridge.set_announcement_callback(self.announce)
 
     async def connect(self) -> None:
+        self._session_ready = False
+        started = time.perf_counter()
         url = f"{self.base_url}?model={self.model}"
         headers = {"Authorization": f"Bearer {self.api_key}", "x-dashscope-dataInspection": "disable"}
         self.ws = await websockets.connect(url, additional_headers=headers, max_size=None)
+        self._response_active = False
+        self._user_speaking = False
+        self._connection_lost.clear()
+        self._connected_at = time.perf_counter()
+        log.info("VOICE Qwen websocket connected handshake_ms=%.1f", (self._connected_at - started) * 1000)
         await self.send({"type": "session.update", "session": {
             "modalities": ["text", "audio"],
             "voice": self.voice,
@@ -106,16 +122,32 @@ class QwenRealtimeClient:
         await self._flush_announcements()
 
     async def _flush_announcements(self) -> None:
-        if self._response_active or self._user_speaking or not self.ws:
-            return
-        while not self._pending_announcements.empty():
+        async with self._announcement_lock:
+            if (self._response_active or self._user_speaking or not self.ws
+                    or not self._session_ready or self._connection_lost.is_set()
+                    or self._pending_announcements.empty()):
+                return
             text = await self._pending_announcements.get()
-            await self.send({"type": "conversation.item.create", "item": {
-                "type": "message", "role": "system",
-                "content": [{"type": "input_text", "text": text}]
-            }})
-            await self.send({"type": "response.create", "response": {"modalities": ["audio", "text"]}})
-            return
+            # A system message alone can leave Qwen answering the old running
+            # tool output. Inject a NEW matched call/result pair as documented
+            # history, so the next inference consumes the completed result.
+            call_id = "background_" + uuid.uuid4().hex
+            self._response_active = True
+            try:
+                await self.send({"type": "conversation.item.create", "item": {
+                    "type": "function_call", "call_id": call_id,
+                    "name": "hermes_start",
+                    "arguments": json.dumps({"request": "Deliver the completed background task result."})
+                }})
+                await self._write_tool_output(call_id, json.dumps({
+                    "status": "completed", "result": text,
+                    "instruction": "The task has finished. Speak the supplied result now. Do not say you are still working or call any tool."
+                }, ensure_ascii=False))
+                log.info("VOICE background result submitted call_id=%s chars=%d", call_id, len(text))
+            except BaseException:
+                self._response_active = False
+                await self._pending_announcements.put(text)
+                raise
 
     async def receive_loop(self) -> None:
         assert self.ws is not None
@@ -124,51 +156,120 @@ class QwenRealtimeClient:
                 event = json.loads(raw)
                 kind = event.get("type", "")
                 if kind == "session.updated":
-                    log.info("Qwen session ready: %s", event.get("session", {}).get("id", ""))
+                    self._session_ready = True
+                    elapsed = ((time.perf_counter() - self._connected_at) * 1000
+                               if self._connected_at else 0.0)
+                    log.info("VOICE Qwen session ready session_id=%s session_update_ms=%.1f",
+                             event.get("session", {}).get("id", ""), elapsed)
+                    await self._flush_announcements()
                 elif kind == "response.created":
                     self._response_active = True
+                    self._response_started_at = time.perf_counter()
+                    self._first_audio_logged = False
                 elif kind == "response.done":
                     self._response_active = False
+                    elapsed = ((time.perf_counter() - self._response_started_at) * 1000
+                               if self._response_started_at else 0.0)
+                    log.info("VOICE Qwen response done response_ms=%.1f", elapsed)
                     await self._flush_announcements()
                 elif kind == "input_audio_buffer.speech_started":
                     self._user_speaking = True
                     self.player.clear()
+                    log.info("VOICE speech_started")
                 elif kind == "input_audio_buffer.speech_stopped":
                     self._user_speaking = False
+                    log.info("VOICE speech_stopped")
                 elif kind == "response.audio.delta":
+                    if not self._first_audio_logged:
+                        elapsed = ((time.perf_counter() - self._response_started_at) * 1000
+                                   if self._response_started_at else 0.0)
+                        log.info("VOICE first_audio_delta response_ms=%.1f", elapsed)
+                        self._first_audio_logged = True
                     self.player.add(base64.b64decode(event.get("delta", "")))
                 elif kind == "conversation.item.input_audio_transcription.completed":
                     transcript = event.get("transcript", "")
                     if transcript:
+                        log.info("VOICE user transcript chars=%d", len(transcript))
                         print(f"\n[You] {transcript}")
                 elif kind == "response.audio_transcript.done":
                     transcript = event.get("transcript", "")
                     if transcript:
+                        log.info("VOICE response transcript chars=%d", len(transcript))
                         print(f"[Voice] {transcript}")
                 elif kind == "response.function_call_arguments.done":
+                    log.info("QWEN tool call name=%s arguments_chars=%d", event.get("name", ""),
+                             len(event.get("arguments", "") or ""))
                     asyncio.create_task(self._handle_tool_call(event), name=f"tool-{event.get('call_id', '')}")
                 elif kind == "error":
                     log.error("Qwen error: %s", event.get("error", event))
         finally:
-            self._closed.set()
+            self._session_ready = False
+            self._connection_lost.set()
 
     async def capture_loop(self) -> None:
-        while not self._closed.is_set():
+        while not self._closed.is_set() and not self._connection_lost.is_set():
             chunk = await asyncio.to_thread(self.capture.read)
+            if self._connection_lost.is_set() or self._closed.is_set():
+                return
             if self.audio_mode == "safe" and (self._response_active or self.player.is_playing):
                 await asyncio.sleep(0.01)
                 continue
-            await self.send_audio(chunk)
+            try:
+                await self.send_audio(chunk)
+            except Exception:
+                self._connection_lost.set()
+                return
             await asyncio.sleep(0)
 
     async def run(self) -> None:
-        await self.connect()
-        print("Hermes Voice Gateway connected. Speak naturally; Ctrl+C to exit.")
-        if self.audio_mode == "headset":
-            print("Desktop full-duplex mode: use headphones/headset to prevent acoustic echo.")
-        await asyncio.gather(self.receive_loop(), self.capture_loop())
+        reconnect_delay = 1.0
+        announced = False
+        while not self._closed.is_set():
+            receiver: asyncio.Task[None] | None = None
+            capture: asyncio.Task[None] | None = None
+            try:
+                await self.connect()
+                if not announced:
+                    print("Hermes Voice Gateway connected. Speak naturally; Ctrl+C to exit.")
+                    if self.audio_mode == "headset":
+                        print("Desktop full-duplex mode: use headphones/headset to prevent acoustic echo.")
+                    announced = True
+                receiver = asyncio.create_task(self.receive_loop(), name="qwen-receive")
+                capture = asyncio.create_task(self.capture_loop(), name="audio-capture")
+                done, pending = await asyncio.wait(
+                    {receiver, capture}, return_when=asyncio.FIRST_COMPLETED)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                for task in done:
+                    error = task.exception()
+                    if error is not None:
+                        raise error
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if not self._closed.is_set():
+                    log.warning("VOICE Qwen connection ended (%s); reconnecting in %.1fs",
+                                type(exc).__name__, reconnect_delay)
+            finally:
+                for task in (receiver, capture):
+                    if task and not task.done():
+                        task.cancel()
+                if receiver or capture:
+                    await asyncio.gather(*(task for task in (receiver, capture) if task),
+                                         return_exceptions=True)
+                if self.ws:
+                    with suppress(Exception):
+                        await self.ws.close()
+                    self.ws = None
+            if not self._closed.is_set():
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, 10.0)
 
     async def close(self) -> None:
         self._closed.set()
+        self._connection_lost.set()
         if self.ws:
-            await self.ws.close()
+            with suppress(Exception):
+                await self.ws.close()

@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     hermes_api_key: str = Field(default="", alias="HERMES_API_KEY")
     hermes_session_id: str = Field(default="voice-main", alias="HERMES_SESSION_ID")
     hermes_session_key: str = Field(default="agent:main:voice:primary", alias="HERMES_SESSION_KEY")
+    hermes_session_rollover_runs: int = Field(default=4, alias="HERMES_SESSION_ROLLOVER_RUNS")
     hermes_inline_wait_seconds: float = Field(default=2.0, alias="HERMES_INLINE_WAIT_SECONDS")
     hermes_poll_interval_seconds: float = Field(default=0.25, alias="HERMES_POLL_INTERVAL_SECONDS")
     hermes_request_timeout_seconds: float = Field(default=15.0, alias="HERMES_REQUEST_TIMEOUT_SECONDS")
