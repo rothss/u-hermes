@@ -56,20 +56,22 @@ class HermesBridge:
             }},
         ]
 
-    async def dispatch(self, name: str, arguments: dict[str, Any]) -> str:
+    async def dispatch(self, name: str, arguments: dict[str, Any],
+                       request_id: str | None = None) -> str:
         if name == "hermes_start":
-            return await self.start(str(arguments.get("request", "")).strip())
+            return await self.start(str(arguments.get("request", "")).strip(), request_id=request_id)
         if name == "hermes_steer":
             return await self.steer(str(arguments.get("instruction", "")).strip())
         if name == "hermes_stop":
             return await self.stop()
         return json.dumps({"status": "error", "error": f"unknown tool: {name}"}, ensure_ascii=False)
 
-    async def start(self, request: str) -> str:
+    async def start(self, request: str, request_id: str | None = None) -> str:
         if not request:
             return json.dumps({"status": "error", "error": "empty request"}, ensure_ascii=False)
         started = time.perf_counter()
-        run = await self.hermes.start_run(request)
+        idempotency_key = f"qwen-{request_id}" if request_id else None
+        run = await self.hermes.start_run(request, idempotency_key=idempotency_key)
         async with self._lock:
             self._runs[run.run_id] = run
             self._active_run_id = run.run_id
