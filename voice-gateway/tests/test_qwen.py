@@ -60,3 +60,25 @@ async def test_result_waits_for_session_and_survives_send_failure():
     q.ws = Socket()
     await q._flush_announcements()
     assert json.loads(q.ws.events[1]['item']['output'])['result'] == 'preserve me'
+
+
+@pytest.mark.asyncio
+async def test_capture_waits_until_session_updated():
+    q = client()
+    q._session_ready = False
+    q._session_ready_event.clear()
+    q._connection_lost.clear()
+    q.capture.read = Mock(return_value=b"\x00\x00" * 320)
+
+    task = asyncio.create_task(q.capture_loop())
+    await asyncio.sleep(0.01)
+    assert q.ws.events == []
+
+    q._session_ready_event.set()
+    await asyncio.sleep(0.01)
+    q._connection_lost.set()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert q.ws.events
+    assert q.ws.events[0]["type"] == "input_audio_buffer.append"
