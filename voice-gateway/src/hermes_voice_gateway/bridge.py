@@ -22,6 +22,7 @@ class HermesBridge:
         self._runs: dict[str, HermesRun] = {}
         self._active_run_id: str | None = None
         self._monitor_tasks: dict[str, asyncio.Task[None]] = {}
+        self._pending_approvals: dict[str, dict[str, Any]] = {}
         self._announce: AnnouncementCallback | None = None
         self._lock = asyncio.Lock()
 
@@ -54,6 +55,17 @@ class HermesBridge:
                 "description": "Stop/cancel the currently active Hermes task when the user asks to stop it.",
                 "parameters": {"type": "object", "properties": {}}
             }},
+            {"type": "function", "function": {
+                "name": "hermes_approval",
+                "description": "Resolve a Hermes safety approval ONLY after the user explicitly approves or denies the pending action. Never infer approval from silence, vague agreement, or unrelated speech.",
+                "parameters": {"type": "object", "properties": {
+                    "choice": {
+                        "type": "string",
+                        "enum": ["once", "deny"],
+                        "description": "Use once only for explicit one-time approval; use deny for explicit rejection."
+                    }
+                }, "required": ["choice"]}
+            }},
         ]
 
     async def dispatch(self, name: str, arguments: dict[str, Any],
@@ -64,6 +76,8 @@ class HermesBridge:
             return await self.steer(str(arguments.get("instruction", "")).strip())
         if name == "hermes_stop":
             return await self.stop()
+        if name == "hermes_approval":
+            return await self.approval(str(arguments.get("choice", "")).strip())
         return json.dumps({"status": "error", "error": f"unknown tool: {name}"}, ensure_ascii=False)
 
     async def start(self, request: str, request_id: str | None = None) -> str:
@@ -87,6 +101,11 @@ class HermesBridge:
                 "run_id": run.run_id,
                 "instruction": "Acknowledge briefly that Hermes is working. Do not invent or summarize a result yet. The completed result will be delivered automatically."
             }, ensure_ascii=False)
+        if terminal.status == "waiting_for_approval":
+            self._remember_approval(terminal)
+            log.info("HERMES run waiting approval run_id=%s elapsed_ms=%.1f",
+                     run.run_id, (time.perf_counter() - started) * 1000)
+            return self._approval_tool_output(terminal)
         await self._record_terminal(terminal)
         log.info("HERMES run terminal run_id=%s status=%s elapsed_ms=%.1f",
                  run.run_id, terminal.status, (time.perf_counter() - started) * 1000)
@@ -102,6 +121,31 @@ class HermesBridge:
             return json.dumps({"status": "error", "run_id": run_id, "error": str(exc)}, ensure_ascii=False)
         return json.dumps({"status": "steer_queued", "run_id": run_id, "hermes": result}, ensure_ascii=False)
 
+    async def approval(self, choice: str) -> str:
+        if choice not in {"once", "deny"}:
+            return json.dumps({"status": "error", "error": "approval choice must be once or deny"},
+                              ensure_ascii=False)
+        run_id = self._active_run_id
+        if not run_id or run_id not in self._pending_approvals:
+            return json.dumps({"status": "no_pending_approval"}, ensure_ascii=False)
+        approval = self._pending_approvals[run_id]
+        request_id = approval.get("request_id")
+        try:
+            result = await self.hermes.approve(run_id, choice, request_id=request_id)
+        except Exception as exc:
+            return json.dumps({"status": "error", "run_id": run_id, "error": str(exc)},
+                              ensure_ascii=False)
+        self._pending_approvals.pop(run_id, None)
+        task = asyncio.create_task(self._monitor(run_id), name=f"hermes-monitor-{run_id}")
+        self._monitor_tasks[run_id] = task
+        return json.dumps({
+            "status": "approval_submitted",
+            "run_id": run_id,
+            "choice": choice,
+            "hermes": result,
+            "instruction": "Acknowledge the user's approval decision briefly. Hermes will continue and the final result will be delivered automatically."
+        }, ensure_ascii=False)
+
     async def stop(self) -> str:
         run_id = self._active_run_id
         if not run_id:
@@ -116,6 +160,13 @@ class HermesBridge:
         started = time.perf_counter()
         try:
             terminal = await self.hermes.wait_for_terminal(run_id)
+            if terminal.status == "waiting_for_approval":
+                self._remember_approval(terminal)
+                log.info("HERMES background waiting approval run_id=%s elapsed_ms=%.1f",
+                         run_id, (time.perf_counter() - started) * 1000)
+                if self._announce:
+                    await self._announce(self._approval_announcement(terminal))
+                return
             await self._record_terminal(terminal)
             log.info("HERMES background completed run_id=%s status=%s elapsed_ms=%.1f",
                      run_id, terminal.status, (time.perf_counter() - started) * 1000)
@@ -131,8 +182,39 @@ class HermesBridge:
     async def _record_terminal(self, run: HermesRun) -> None:
         async with self._lock:
             self._runs[run.run_id] = run
+            self._pending_approvals.pop(run.run_id, None)
             if self._active_run_id == run.run_id:
                 self._active_run_id = None
+
+    def _remember_approval(self, run: HermesRun) -> None:
+        approval = {}
+        if run.raw:
+            approval = dict(run.raw.get("approval") or {})
+        self._pending_approvals[run.run_id] = approval
+
+    @staticmethod
+    def _approval_tool_output(run: HermesRun) -> str:
+        approval = dict((run.raw or {}).get("approval") or {})
+        description = approval.get("description") or approval.get("prompt") or approval.get("command") or "a protected action"
+        return json.dumps({
+            "status": "waiting_for_approval",
+            "run_id": run.run_id,
+            "approval": {
+                "description": description,
+                "choices": ["once", "deny"],
+            },
+            "instruction": "Hermes is waiting at a safety gate. Ask the user to explicitly say approve once or deny. Do not approve automatically."
+        }, ensure_ascii=False)
+
+    @staticmethod
+    def _approval_announcement(run: HermesRun) -> str:
+        approval = dict((run.raw or {}).get("approval") or {})
+        description = approval.get("description") or approval.get("prompt") or approval.get("command") or "a protected action"
+        return (
+            "Hermes is paused at a safety approval gate. Explain this protected action to the user: "
+            + str(description)
+            + ". Ask the user to explicitly approve this action once or deny it. Never infer approval."
+        )
 
     @staticmethod
     def _terminal_tool_output(run: HermesRun) -> str:
