@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,8 +31,6 @@ class HermesClient:
         headers = {"Accept": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        if session_id:
-            headers["X-Hermes-Session-Id"] = session_id
         if session_key:
             headers["X-Hermes-Session-Key"] = session_key
         self.session_id = session_id
@@ -56,17 +55,36 @@ class HermesClient:
         r.raise_for_status()
         return r.json()
 
-    async def start_run(self, text: str) -> HermesRun:
+    async def start_run(self, text: str, idempotency_key: str | None = None) -> HermesRun:
         started = time.perf_counter()
         run_session_id = self._session_id_for_next_run()
         payload: dict[str, Any] = {"input": text}
+        request_headers: dict[str, str] = {
+            "Idempotency-Key": idempotency_key or f"voice-{uuid.uuid4().hex}"
+        }
         if run_session_id:
             payload["session_id"] = run_session_id
-        r = await self._http.post("/v1/runs", json=payload)
+            # Keep Hermes transcript continuity explicit and consistent with the
+            # dynamic rollover session in the JSON body.
+            request_headers["X-Hermes-Session-Id"] = run_session_id
+
+        # A POST can fail after Hermes accepted it but before the client receives
+        # the 202. Retrying once with the SAME Idempotency-Key is safe on Hermes
+        # v0.21.3+ and prevents duplicate email/SSH/file side effects.
+        for attempt in range(2):
+            try:
+                r = await self._http.post("/v1/runs", json=payload, headers=request_headers)
+                break
+            except httpx.TransportError:
+                if attempt:
+                    raise
+                log.warning("HERMES run submit transport error; retrying idempotently")
+                await asyncio.sleep(0.2)
         r.raise_for_status()
         data = r.json()
-        log.info("HERMES run submitted run_id=%s session=%s post_ms=%.1f",
+        log.info("HERMES run submitted run_id=%s session=%s replayed=%s post_ms=%.1f",
                  data.get("run_id", ""), run_session_id or "<run>",
+                 r.headers.get("Idempotency-Replayed", "false"),
                  (time.perf_counter() - started) * 1000)
         return HermesRun(run_id=data["run_id"], status=data.get("status", "started"), raw=data)
 
