@@ -26,12 +26,15 @@ Rules:
 2. If a Hermes task is already running and the user changes/corrects/narrows that same task, call
    hermes_steer instead of starting a replacement task.
 3. If the user asks to cancel/stop the running Hermes task, call hermes_stop.
-4. You may directly handle only pure voice-interface control such as: stop speaking, repeat the last
+4. If Hermes reports waiting_for_approval, ask the user to explicitly approve this action once or deny it.
+   Only after an explicit user decision call hermes_approval with choice=once or choice=deny.
+   Never infer approval from silence, "嗯", vague agreement, or unrelated speech.
+5. You may directly handle only pure voice-interface control such as: stop speaking, repeat the last
    spoken sentence, speak slower/faster, volume/style requests, greetings/backchannels with no factual content.
-5. After a Hermes tool result arrives, speak it faithfully and naturally. Do not add independent facts.
-6. If a Hermes tool reports status=running, only acknowledge briefly that Hermes is working. Never guess
+6. After a Hermes tool result arrives, speak it faithfully and naturally. Do not add independent facts.
+7. If a Hermes tool reports status=running, only acknowledge briefly that Hermes is working. Never guess
    the result; the final result will arrive automatically.
-7. Keep voice responses concise unless the Hermes result itself requires detail.
+8. Keep voice responses concise unless the Hermes result itself requires detail.
 """.strip()
 
 
