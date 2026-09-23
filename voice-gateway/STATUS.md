@@ -1,17 +1,23 @@
 # MVP status
 
 - Architecture: Plan B — Hermes is the sole reasoning/agent brain.
-- Speech transport: Qwen-Audio-3.1-Realtime-Plus over WebSocket.
-- Hermes integration: /v1/runs + session continuity + /steer + /stop.
-- Desktop audio: headset full-duplex mode, plus safe anti-echo mode.
-- Local unit tests: 4 passed before GitHub staging.
-- Secrets: not committed.
+- Speech transport: Alibaba Cloud Bailian `qwen-audio-3.1-realtime-plus` over WebSocket.
+- Voice host: ZhuanZ Windows PC.
+- Hermes integration: `/v1/runs` + bounded transcript session + stable memory key + SSE + `/steer` + `/stop` + explicit run approval.
+- Reliability: Qwen reconnect, background-result retention, Qwen call-id dedupe, Hermes idempotent run submission.
+- Audio: 40 ms input frames; headset mode is full duplex, safe mode is anti-feedback half duplex.
+- Secrets: local `.env` only; not committed.
 
-## Deployment status
+## Validation state
 
-Code and Windows scripts are ready. A real-machine launch still requires:
-1. a QwenCloud Singapore-region API key;
-2. a running Hermes API server on the target Windows machine;
-3. the machine's chosen microphone/output device.
+The previously deployed ZhuanZ build successfully connected to Bailian Beijing and Hermes 0.21.3. The optimization commits after that live run still need to be pulled and re-run locally before their tests are reported as passed.
 
-This branch is a staging location because the connected GitHub integration can edit repositories but cannot create a brand-new repository. The module can be moved to a dedicated repository later without changing its package structure.
+Required validation after pull:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+.\scripts\windows\check.ps1
+.\scripts\windows\run.ps1
+```
+
+Golden-path checks should include normal Hermes routing, long-run completion, steer, stop, explicit approve-once/deny, reconnect without duplicate side effects, and headset barge-in.
