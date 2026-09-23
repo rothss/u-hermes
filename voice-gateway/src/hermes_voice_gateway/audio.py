@@ -49,7 +49,7 @@ class PCMPlayer:
 
 
 class PCMCapture:
-    def __init__(self, device_index: int | None = None, sample_rate: int = 16000, chunk_ms: int = 100) -> None:
+    def __init__(self, device_index: int | None = None, sample_rate: int = 16000, chunk_ms: int = 40) -> None:
         self._pa = pyaudio.PyAudio()
         self.frames_per_chunk = max(160, int(sample_rate * chunk_ms / 1000))
         self._stream = self._pa.open(format=pyaudio.paInt16, channels=1, rate=sample_rate,
