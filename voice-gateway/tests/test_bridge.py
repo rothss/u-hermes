@@ -16,6 +16,7 @@ class FakeHermes:
         self.started: list[str] = []
         self.steered: list[tuple[str, str]] = []
         self.stopped: list[str] = []
+        self.approved: list[tuple[str, str, str | None]] = []
 
     async def start_run(self, text: str, idempotency_key: str | None = None) -> HermesRun:
         self.started.append(text)
@@ -32,6 +33,10 @@ class FakeHermes:
     async def steer(self, run_id: str, text: str):
         self.steered.append((run_id, text))
         return {"status": "accepted"}
+
+    async def approve(self, run_id: str, choice: str, request_id: str | None = None):
+        self.approved.append((run_id, choice, request_id))
+        return {"status": "resolved"}
 
     async def stop(self, run_id: str):
         self.stopped.append(run_id)
@@ -75,4 +80,23 @@ async def test_steer_and_stop_use_active_run():
     assert stop["status"] == "stopping"
     assert fake.steered == [("run-3", "switch machine")]
     assert fake.stopped == ["run-3"]
+    await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_explicit_approval_resumes_same_run():
+    waiting = HermesRun(
+        "run-approval",
+        "waiting_for_approval",
+        raw={"approval": {"request_id": "req-1", "description": "Run protected command"}},
+    )
+    fake = FakeHermes(waiting)
+    bridge = HermesBridge(fake, inline_wait_seconds=0.1)
+    first = json.loads(await bridge.start("protected action", request_id="call-approval"))
+    assert first["status"] == "waiting_for_approval"
+    assert bridge.active_run_id == "run-approval"
+
+    result = json.loads(await bridge.approval("once"))
+    assert result["status"] == "approval_submitted"
+    assert fake.approved == [("run-approval", "once", "req-1")]
     await bridge.close()
