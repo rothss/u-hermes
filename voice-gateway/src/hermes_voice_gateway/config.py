@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     dashscope_api_key: str = Field(alias="DASHSCOPE_API_KEY")
     qwen_realtime_model: str = Field(default="qwen-audio-3.1-realtime-plus", alias="QWEN_REALTIME_MODEL")
     qwen_realtime_url: str = Field(
-        default="wss://maas.qwencloudapi.com/api-ws/v1/realtime",
+        default="wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
         alias="QWEN_REALTIME_URL",
     )
     qwen_voice: str = Field(default="longanqian_v3.1", alias="QWEN_VOICE")
@@ -28,6 +28,6 @@ class Settings(BaseSettings):
 
     audio_input_device: int | None = Field(default=None, alias="AUDIO_INPUT_DEVICE")
     audio_output_device: int | None = Field(default=None, alias="AUDIO_OUTPUT_DEVICE")
-    audio_chunk_ms: int = Field(default=100, alias="AUDIO_CHUNK_MS")
+    audio_chunk_ms: int = Field(default=40, alias="AUDIO_CHUNK_MS")
     audio_mode: str = Field(default="headset", alias="AUDIO_MODE")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
