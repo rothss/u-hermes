@@ -53,6 +53,9 @@ class QwenRealtimeClient:
         self._send_lock = asyncio.Lock()
         self._announcement_lock = asyncio.Lock()
         self._session_ready = False
+        self._session_ready_event = asyncio.Event()
+        self._connection_ever_ready = False
+        self._seen_tool_call_ids: set[str] = set()
         self._response_active = False
         self._user_speaking = False
         self._closed = asyncio.Event()
@@ -65,8 +68,12 @@ class QwenRealtimeClient:
 
     async def connect(self) -> None:
         self._session_ready = False
+        self._session_ready_event.clear()
+        self._connection_ever_ready = False
+        self._seen_tool_call_ids.clear()
         started = time.perf_counter()
-        url = f"{self.base_url}?model={self.model}"
+        separator = "&" if "?" in self.base_url else "?"
+        url = self.base_url if "model=" in self.base_url else f"{self.base_url}{separator}model={self.model}"
         headers = {"Authorization": f"Bearer {self.api_key}", "x-dashscope-dataInspection": "disable"}
         self.ws = await websockets.connect(url, additional_headers=headers, max_size=None)
         self._response_active = False
@@ -103,7 +110,7 @@ class QwenRealtimeClient:
         await self.send({"type": "response.create", "response": {"modalities": ["audio", "text"]}})
 
     async def _handle_tool_call(self, event: dict[str, Any]) -> None:
-        call_id = event.get("call_id")
+        call_id = str(event.get("call_id") or "")
         name = event.get("name", "")
         raw_args = event.get("arguments", "{}")
         try:
@@ -111,11 +118,28 @@ class QwenRealtimeClient:
         except json.JSONDecodeError:
             args = {}
         try:
-            output = await self.bridge.dispatch(name, args)
+            output = await self.bridge.dispatch(name, args, request_id=call_id or None)
         except Exception as exc:
             log.exception("Tool call failed: %s", name)
             output = json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False)
-        await self._write_tool_output(call_id, output)
+        try:
+            await self._write_tool_output(call_id, output)
+        except Exception:
+            # Never re-run an already-started Hermes action just because the
+            # speech websocket disappeared. Preserve terminal results and let a
+            # fresh Qwen session announce them after reconnect.
+            log.exception("VOICE failed to return tool output call_id=%s name=%s", call_id, name)
+            self._connection_lost.set()
+            if name == "hermes_start":
+                try:
+                    data = json.loads(output)
+                except json.JSONDecodeError:
+                    data = {}
+                if data.get("status") != "running":
+                    result = data.get("result") or data.get("error") or output
+                    await self._pending_announcements.put(
+                        "Recovered Hermes result after the voice connection dropped:\n" + str(result)
+                    )
 
     async def announce(self, text: str) -> None:
         await self._pending_announcements.put(text)
@@ -157,6 +181,8 @@ class QwenRealtimeClient:
                 kind = event.get("type", "")
                 if kind == "session.updated":
                     self._session_ready = True
+                    self._session_ready_event.set()
+                    self._connection_ever_ready = True
                     elapsed = ((time.perf_counter() - self._connected_at) * 1000
                                if self._connected_at else 0.0)
                     log.info("VOICE Qwen session ready session_id=%s session_update_ms=%.1f",
@@ -197,16 +223,28 @@ class QwenRealtimeClient:
                         log.info("VOICE response transcript chars=%d", len(transcript))
                         print(f"[Voice] {transcript}")
                 elif kind == "response.function_call_arguments.done":
-                    log.info("QWEN tool call name=%s arguments_chars=%d", event.get("name", ""),
+                    call_id = str(event.get("call_id") or "")
+                    log.info("QWEN tool call name=%s call_id=%s arguments_chars=%d",
+                             event.get("name", ""), call_id,
                              len(event.get("arguments", "") or ""))
-                    asyncio.create_task(self._handle_tool_call(event), name=f"tool-{event.get('call_id', '')}")
+                    if call_id and call_id in self._seen_tool_call_ids:
+                        log.warning("QWEN duplicate tool call ignored call_id=%s", call_id)
+                    else:
+                        if call_id:
+                            self._seen_tool_call_ids.add(call_id)
+                        asyncio.create_task(self._handle_tool_call(event), name=f"tool-{call_id}")
                 elif kind == "error":
                     log.error("Qwen error: %s", event.get("error", event))
         finally:
             self._session_ready = False
+            self._session_ready_event.clear()
             self._connection_lost.set()
 
     async def capture_loop(self) -> None:
+        # Qwen only allows turn-detection/audio-format changes before the first
+        # audio frame. Wait for session.updated so smart_turn is definitely live
+        # before the microphone starts feeding the socket.
+        await self._session_ready_event.wait()
         while not self._closed.is_set() and not self._connection_lost.is_set():
             chunk = await asyncio.to_thread(self.capture.read)
             if self._connection_lost.is_set() or self._closed.is_set():
@@ -264,8 +302,10 @@ class QwenRealtimeClient:
                         await self.ws.close()
                     self.ws = None
             if not self._closed.is_set():
-                await asyncio.sleep(reconnect_delay)
-                reconnect_delay = min(reconnect_delay * 2, 10.0)
+                delay = 1.0 if self._connection_ever_ready else reconnect_delay
+                await asyncio.sleep(delay)
+                reconnect_delay = (1.0 if self._connection_ever_ready
+                                   else min(reconnect_delay * 2, 10.0))
 
     async def close(self) -> None:
         self._closed.set()
