@@ -64,6 +64,7 @@ class QwenRealtimeClient:
         self._closed = asyncio.Event()
         self._connection_lost = asyncio.Event()
         self._pending_announcements: asyncio.Queue[str] = asyncio.Queue()
+        self._background_pending_accept: tuple[str, str] | None = None
         self._response_started_at: float | None = None
         self._first_audio_logged = False
         self._connected_at: float | None = None
@@ -170,9 +171,13 @@ class QwenRealtimeClient:
                     "status": "completed", "result": text,
                     "instruction": "The task has finished. Speak the supplied result now. Do not say you are still working or call any tool."
                 }, ensure_ascii=False))
+                # The websocket send completing only means the client frame left us.
+                # Keep a recoverable copy until the server confirms response.created.
+                self._background_pending_accept = (call_id, text)
                 log.info("VOICE background result submitted call_id=%s chars=%d", call_id, len(text))
             except BaseException:
                 self._response_active = False
+                self._background_pending_accept = None
                 await self._pending_announcements.put(text)
                 raise
 
@@ -193,6 +198,10 @@ class QwenRealtimeClient:
                     await self._flush_announcements()
                 elif kind == "response.created":
                     self._response_active = True
+                    if self._background_pending_accept is not None:
+                        call_id, _ = self._background_pending_accept
+                        log.info("VOICE background response accepted call_id=%s", call_id)
+                        self._background_pending_accept = None
                     self._response_started_at = time.perf_counter()
                     self._first_audio_logged = False
                 elif kind == "response.done":
@@ -238,6 +247,16 @@ class QwenRealtimeClient:
                         asyncio.create_task(self._handle_tool_call(event), name=f"tool-{call_id}")
                 elif kind == "error":
                     log.error("Qwen error: %s", event.get("error", event))
+                    # A background result may race with fresh user speech. Qwen can
+                    # reject response.create in that state. If response.created was
+                    # never observed, retain the result for the next safe turn.
+                    if self._background_pending_accept is not None:
+                        call_id, text = self._background_pending_accept
+                        self._background_pending_accept = None
+                        self._response_active = False
+                        await self._pending_announcements.put(text)
+                        log.warning("VOICE background response not accepted; queued for retry call_id=%s",
+                                    call_id)
         finally:
             self._session_ready = False
             self._session_ready_event.clear()
