@@ -1,0 +1,48 @@
+name: Voice Gateway CI
+
+on:
+  push:
+    branches:
+      - main
+      - feature/hermes-voice-gateway
+    paths:
+      - "voice-gateway/**"
+      - ".github/workflows/voice-gateway-ci.yml"
+  pull_request:
+    paths:
+      - "voice-gateway/**"
+      - ".github/workflows/voice-gateway-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: voice-gateway
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PortAudio
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y portaudio19-dev
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: voice-gateway/pyproject.toml
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Compile
+        run: python -m compileall -q src tests
+
+      - name: Test
+        run: python -m pytest -q
