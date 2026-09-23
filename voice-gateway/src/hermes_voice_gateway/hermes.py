@@ -13,6 +13,7 @@ import httpx
 log = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
+RETURNABLE_STATUSES = TERMINAL_STATUSES | {"waiting_for_approval"}
 
 
 @dataclass(slots=True)
@@ -145,8 +146,8 @@ class HermesClient:
                     line = await asyncio.wait_for(anext(lines), timeout=5.0)
                 except asyncio.TimeoutError:
                     current = await self.get_run(run_id)
-                    if current.status in TERMINAL_STATUSES:
-                        log.info("HERMES SSE fallback terminal run_id=%s status=%s", run_id, current.status)
+                    if current.status in RETURNABLE_STATUSES:
+                        log.info("HERMES SSE fallback state run_id=%s status=%s", run_id, current.status)
                         return current
                     continue
                 except StopAsyncIteration:
@@ -157,6 +158,13 @@ class HermesClient:
                         event = json.loads("\n".join(data_lines))
                         name = str(event.get("event", "") or event_name)
                         log.debug("HERMES SSE event run_id=%s name=%s", run_id, name)
+                        if name == "approval.request":
+                            log.info("HERMES approval requested run_id=%s", run_id)
+                            return HermesRun(
+                                run_id=run_id,
+                                status="waiting_for_approval",
+                                raw={"approval": event},
+                            )
                         if name in terminal_events:
                             log.info("HERMES SSE terminal run_id=%s name=%s", run_id, name)
                             return await self.get_run(run_id)
@@ -174,10 +182,19 @@ class HermesClient:
         delay = max(0.1, self.poll_interval)
         while True:
             run = await self.get_run(run_id)
-            if run.status in TERMINAL_STATUSES:
+            if run.status in RETURNABLE_STATUSES:
                 return run
             await asyncio.sleep(delay)
             delay = min(delay * 2, 2.0)
+
+    async def approve(self, run_id: str, choice: str,
+                      request_id: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"choice": choice}
+        if request_id:
+            payload["request_id"] = request_id
+        r = await self._http.post(f"/v1/runs/{run_id}/approval", json=payload)
+        r.raise_for_status()
+        return r.json()
 
     async def steer(self, run_id: str, text: str) -> dict[str, Any]:
         r = await self._http.post(f"/v1/runs/{run_id}/steer", json={"input": text})
