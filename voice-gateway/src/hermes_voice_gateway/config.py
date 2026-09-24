@@ -31,3 +31,10 @@ class Settings(BaseSettings):
     audio_chunk_ms: int = Field(default=40, alias="AUDIO_CHUNK_MS")
     audio_mode: str = Field(default="headset", alias="AUDIO_MODE")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+
+    # Mobile AppServer / control plane. The long-lived Bailian key remains here;
+    # mobile clients receive only one-time AOQ connection credentials.
+    mobile_gateway_host: str = Field(default="0.0.0.0", alias="MOBILE_GATEWAY_HOST")
+    mobile_gateway_port: int = Field(default=8787, alias="MOBILE_GATEWAY_PORT")
+    mobile_gateway_token: str = Field(default="", alias="MOBILE_GATEWAY_TOKEN")
+    qwen_aoq_token_url: str = Field(default="", alias="QWEN_AOQ_TOKEN_URL")
