@@ -111,7 +111,9 @@ class MobileAgentSession:
         async with self.send_lock:
             self.socket = socket
             while self.pending_events:
-                await socket.send_json(self.pending_events.popleft())
+                event = self.pending_events[0]
+                await socket.send_json(event)
+                self.pending_events.popleft()
 
     async def detach(self, socket: WebSocket) -> None:
         async with self.send_lock:
