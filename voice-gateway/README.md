@@ -4,7 +4,7 @@ Full-duplex voice shell for **Hermes Agent**, using **Qwen-Audio-3.1-Realtime-Pl
 
 ## What v0.1 does
 
-- streams 16 kHz / 16-bit / mono PCM to Qwen Realtime in 40 ms frames;
+- streams 16 kHz / 16-bit / mono PCM to Qwen Realtime in 100 ms frames;
 - plays Qwen's 24 kHz streaming speech immediately;
 - waits for `session.updated` before sending the first microphone frame;
 - clears queued speech on user barge-in;
@@ -49,7 +49,7 @@ QWEN_REALTIME_URL=wss://YOUR_WORKSPACE_ID.cn-beijing.maas.aliyuncs.com/api-ws/v1
 HERMES_API_KEY=your-hermes-api-key
 HERMES_BASE_URL=http://127.0.0.1:8642
 
-AUDIO_CHUNK_MS=40
+AUDIO_CHUNK_MS=100
 AUDIO_MODE=headset
 ```
 
