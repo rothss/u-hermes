@@ -5,7 +5,7 @@
 - Voice host: ZhuanZ Windows PC.
 - Hermes integration: `/v1/runs` + bounded transcript session + stable memory key + SSE + `/steer` + `/stop` + explicit run approval.
 - Reliability: Qwen reconnect, background-result retention, Qwen call-id dedupe, Hermes idempotent run submission.
-- Audio: 40 ms input frames; headset mode is full duplex, safe mode is anti-feedback half duplex.
+- Audio: 100 ms input frames; headset mode is full duplex, safe mode is anti-feedback half duplex.
 - Secrets: local `.env` only; not committed.
 
 ## Validation state
