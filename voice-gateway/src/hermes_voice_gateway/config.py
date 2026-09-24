@@ -28,7 +28,7 @@ class Settings(BaseSettings):
 
     audio_input_device: int | None = Field(default=None, alias="AUDIO_INPUT_DEVICE")
     audio_output_device: int | None = Field(default=None, alias="AUDIO_OUTPUT_DEVICE")
-    audio_chunk_ms: int = Field(default=40, alias="AUDIO_CHUNK_MS")
+    audio_chunk_ms: int = Field(default=100, alias="AUDIO_CHUNK_MS")
     audio_mode: str = Field(default="headset", alias="AUDIO_MODE")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
